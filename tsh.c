@@ -8,8 +8,7 @@
  *  Follow the 15-213/18-213/15-513 style guide at
  *  http://www.cs.cmu.edu/~213/codeStyle.html.>
  *
- * @author Your Name <andrewid@andrew.cmu.edu>
- * TODO: Include your name and Andrew ID here.
+ * @author Taiming Liu <taimingl@andrew.cmu.edu>
  */
 
 #include "csapp.h"
@@ -54,14 +53,14 @@ void sigquit_handler(int sig);
 void cleanup(void);
 
 /**
- * @brief <Write main's function header documentation. What does main do?>
+ * @brief main routine of the shell program.
  *
- * TODO: Delete this comment and replace it with your own.
+ * Takes command and arguments from command line and exexcute requested
+ * programs.
  *
- * "Each function should be prefaced with a comment describing the purpose
- *  of the function (in a sentence or two), the function's arguments and
- *  return value, any error cases that are relevant to the caller,
- *  any pertinent side effects, and any assumptions that the function makes."
+ * @param[in] argc number of command line arguments
+ * @param[in] argv pointer to array of command line arguments
+ *
  */
 int main(int argc, char **argv) {
     int c;
@@ -172,13 +171,27 @@ int main(int argc, char **argv) {
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
+    pid_t pid;  // process ID
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
 
+    /* cmd line error */
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
+        dbg_printf("parse cmd line error or empty cmd line args\n");
         return;
     }
+
+    /* quit command */
+    if (token.builtin == BUILTIN_QUIT) {
+        exit(0);
+    }
+
+    if ((pid = fork()) == 0) { /* Child runs user job */
+        
+    }
+
+    
 
     // TODO: Implement commands here.
 }

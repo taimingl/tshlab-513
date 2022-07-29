@@ -43,6 +43,9 @@
 #define dbg_ensures(...)
 #endif
 
+/* Global variables */
+extern char **environ; /* defined in libc */
+
 /* Function prototypes */
 void eval(const char *cmdline);
 
@@ -171,14 +174,14 @@ int main(int argc, char **argv) {
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
-    pid_t pid;  // process ID
+    pid_t pid; // process ID
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
 
     /* cmd line error */
     if (parse_result == PARSELINE_ERROR || parse_result == PARSELINE_EMPTY) {
-        dbg_printf("parse cmd line error or empty cmd line args\n");
+        printf("parse cmd line error or empty cmd line args\n");
         return;
     }
 
@@ -188,12 +191,26 @@ void eval(const char *cmdline) {
     }
 
     if ((pid = fork()) == 0) { /* Child runs user job */
-        
+        if (execve(token.argv[0], token.argv, environ) < 0) {
+            printf("%s: Command not found. \n", token.argv[0]);
+            exit(0);
+        }
     }
 
-    
+    /* Parent waits for foreground job to terminates */
+    /**
+     * (!) TODO: unix_error function not callable
+     */
+    if (token.builtin != BUILTIN_BG) {
+        int status;
+        if (waitpid(pid, &status, 0) < 0) {
+            perror("waitfg: waitpid error.");
+        }
+    } else {
+        printf("%d %s \n", pid, cmdline);
+    }
 
-    // TODO: Implement commands here.
+    return;
 }
 
 /*****************

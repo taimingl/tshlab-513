@@ -197,6 +197,10 @@ void eval(const char *cmdline) {
     //     }
     // }
 
+    sigset_t mask_all, prev_one;
+    sigfillset(&mask_all);
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_one); /* Block signals */
+
     /* jobs command */
     if (token.builtin == BUILTIN_JOBS) {
         // if (token.outfile != NULL) {
@@ -205,44 +209,113 @@ void eval(const char *cmdline) {
         //     list_jobs(1);
         // }
         list_jobs(1);
+        sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
         return;
     }
 
-    sigset_t mask_all, mask_empty;
-    sigfillset(&mask_all);
-    sigemptyset(&mask_empty);
-    sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Block signals */
+    if (token.builtin == BUILTIN_BG || token.builtin == BUILTIN_FG) {
+        if (token.argv[1] == NULL) {
+            if (token.builtin == BUILTIN_BG) {
+                printf("bg command requires PID or %%jobid argument\n");
+            } else {
+                printf("fg command requires PID or %%jobid argument\n");
+            }
+            sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+            return;
+        } else {
+            if (token.argv[1][0] == '%') {
+                if (!isdigit(token.argv[1][1])) {
+                    if (token.builtin == BUILTIN_BG) {
+                        printf("bg command requires PID or %%jobid argument\n");
+                    } else {
+                        printf("fg command requires PID or %%jobid argument\n");
+                    }
+                    sigprocmask(SIG_SETMASK, &prev_one,
+                                NULL); /* Unblock signals */
+                    return;
+                }
+                jid_t jid = atoi(&token.argv[1][1]);
+                if (job_exists(jid)) {
+                    pid = job_get_pid(jid);
+                } else {
+                    printf("%%%d: No such job\n", jid);
+                    sigprocmask(SIG_SETMASK, &prev_one,
+                                NULL); /* Unblock signals */
+                    return;
+                }
+            } else {
+                if (!isdigit(token.argv[1][0])) {
+                    if (token.builtin == BUILTIN_BG) {
+                        printf("bg: argument must be a PID or %%jobid\n");
+                    } else {
+                        printf("fg: argument must be a PID or %%jobid\n");
+                    }
+                    sigprocmask(SIG_SETMASK, &prev_one,
+                                NULL); /* Unblock signals */
+                    return;
+                }
+                pid = atoi(&token.argv[1][0]);
+            }
+        }
+        if (token.builtin == BUILTIN_BG) {
+            printf("[%d] (%d) %s\n", job_from_pid(pid), pid,
+                   job_get_cmdline(job_from_pid(pid)));
+            if (kill(-pid, SIGCONT) == -1) {
+                printf("Error: failed to kill background job\n");
+            }
+            job_set_state(job_from_pid(pid), BG);
+        }
+        if (token.builtin == BUILTIN_FG) {
+            // printf("[%d] (%d) %s\n", job_from_pid(pid), pid,
+            //        job_get_cmdline(job_from_pid(pid)));
+            if (kill(-pid, SIGCONT) == -1) {
+                printf("Error: failed to kill background job\n");
+            }
+            job_set_state(job_from_pid(pid), FG);
+            while (fg_job() != 0) {
+                sigsuspend(&prev_one);
+            }
+        }
+        sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+        return;
+    }
 
-    if ((pid = fork()) == 0) { /* Child runs user job */
+    pid = fork();
+    if (pid == 0) {                                /* Child runs user job */
+        sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
         if (setpgid(0, 0) < 0) {
             perror("Set process gid error");
         }
-        sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
         if (execve(token.argv[0], token.argv, environ) < 0) {
             printf("%s: Command not found. \n", token.argv[0]);
             fflush(stdout);
             exit(0);
         }
-        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        // sigprocmask(SIG_BLOCK, &mask_all, &prev_one);
+    } else if (pid < 0) {
+        // Non built //Error condition if fork fails
+        printf("Error: Failed to fork a child process.\n");
+        sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+        return;
     }
 
-    /**
-     * (!) TODO: unix_error function not callable
-     */
     /* Parent process */
     job_state j_state = parse_result == PARSELINE_FG ? FG : BG;
     // printf("job state %d\n", j_state);
+    sigprocmask(SIG_BLOCK, &mask_all, NULL);
     add_job(pid, j_state, cmdline);
     // sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
 
     if (j_state == FG) { // foreground job
-        sigemptyset(&mask_empty);
+        // sigemptyset(&mask_one);
         while (fg_job() != 0) {
-            sigsuspend(&mask_empty);
+            sigsuspend(&prev_one);
         }
     } else {
         printf("[%d] (%d) %s\n", job_from_pid(pid), pid, cmdline);
     }
+
+    sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
 
     return;
 }
@@ -252,60 +325,106 @@ void eval(const char *cmdline) {
  *****************/
 
 /**
- * @brief <What does sigchld_handler do?>
+ * @brief Handles SIGCHLD sinals when receives from kernel.
  *
- * TODO: Delete this comment and replace it with your own.
+ * Reaps all the children running on both foreground and background,
+ * and delete the process from the job_list.
+ *
+ * @param[in] sig singal code received.
  */
 void sigchld_handler(int sig) {
     int olderrno = errno;
-    sigset_t mask_all, prev_all;
+    sigset_t mask_all, prev_one;
     pid_t pid;
     int status;
 
     sigfillset(&mask_all);
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_one); /* Block signals */
     while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) >
            0) { /* Reap zombie child */
-        sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
-        if (WIFSIGNALED(status)) {
-            if (WTERMSIG(status) == 2) {
-                sio_printf("Job [%d] terminated by signal %d\n",
-                           job_from_pid(pid), WTERMSIG(status));
-            }
+        if (WIFEXITED(status)) {
             delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        } else if (WIFSIGNALED(status)) {
+            sio_printf("Job [%d] (%d) terminated by signal %d\n",
+                       job_from_pid(pid), pid, WTERMSIG(status));
+            delete_job(job_from_pid(pid));
         } else if (WIFSTOPPED(status)) {
             job_set_state(job_from_pid(pid), ST);
-            sio_printf("Job [%d] stopped by signal %d\n", job_from_pid(pid),
-                       WSTOPSIG(status));
-        } else {
-            delete_job(job_from_pid(pid)); /* Delete child job from job list */
+            sio_printf("Job [%d] (%d) stopped by signal %d\n",
+                       job_from_pid(pid), pid, WSTOPSIG(status));
         }
-        sigprocmask(SIG_SETMASK, &prev_all, NULL);
-        // if (!WIFEXITED(status)) {
-        //     sio_printf("Child %d terminated abnormally\n", pid);
-        // }
-        // sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
-        // delete_job(job_from_pid(pid)); /* Delete child job from job list */
-        // sigprocmask(SIG_SETMASK, &prev_all, NULL);
     }
-    // if (errno != ECHILD) {
-    //     sio_eprintf("waitpid error\n");
-    // }
+    sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
     errno = olderrno;
 }
 
 /**
- * @brief <What does sigint_handler do?>
+ * @brief Handles SIGINT signal when received from kernel.
  *
- * TODO: Delete this comment and replace it with your own.
+ * Receies SIGINT signal when user types Ctrl-C. First finds the job
+ * currently running on the foreground and kills the process. Skip
+ * if nothing found.
+ *
+ * @param[in] sig singal code received
  */
-void sigint_handler(int sig) {}
+void sigint_handler(int sig) {
+    int olderrno = errno;
+    sigset_t mask_all, prev_one;
+    jid_t jid;
+    pid_t pid;
+
+    sigfillset(&mask_all);
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_one); /* Block signals */
+
+    jid = fg_job();
+    if (jid != 0) {
+        pid = job_get_pid(jid);
+
+        if (kill(-pid, SIGINT) == -1) { // kill all processes with the same gid
+            sio_eprintf("Error: failed to kill fg jobs");
+            return;
+        }
+    }
+
+    sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+    errno = olderrno;
+
+    return;
+}
 
 /**
- * @brief <What does sigtstp_handler do?>
+ * @brief Handles SIGTSTP signal when received from kernel.
  *
- * TODO: Delete this comment and replace it with your own.
+ * Receies SIGTSTP signal when user types Ctrl-Z. First finds the job
+ * currently running on the foreground and kills the process. Skip
+ * if nothing found.
+ *
+ * @param[in] sig singal code received
  */
-void sigtstp_handler(int sig) {}
+void sigtstp_handler(int sig) {
+    int olderrno = errno;
+    sigset_t mask_all, prev_one;
+    jid_t jid;
+    pid_t pid;
+
+    sigfillset(&mask_all);
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_one); /* Block signals */
+
+    jid = fg_job();
+    if (jid != 0) {
+        pid = job_get_pid(jid);
+
+        if (kill(-pid, SIGTSTP) == -1) { // kill all processes with the same gid
+            sio_eprintf("Error: failed to kill fg jobs");
+            return;
+        }
+    }
+
+    sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+    errno = olderrno;
+
+    return;
+}
 
 /**
  * @brief Attempt to clean up global resources when the program exits.

@@ -43,9 +43,6 @@
 #define dbg_ensures(...)
 #endif
 
-/* Global variables */
-extern char **environ; /* defined in libc */
-
 /* Function prototypes */
 void eval(const char *cmdline);
 
@@ -174,7 +171,6 @@ int main(int argc, char **argv) {
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
-    pid_t pid; // process ID
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -190,28 +186,70 @@ void eval(const char *cmdline) {
         exit(0);
     }
 
+    pid_t pid; // process ID
+
+    sigset_t mask_all, mask_empty;
+    sigfillset(&mask_all);
+    sigemptyset(&mask_empty);
+    sigprocmask(SIG_BLOCK, &mask_all, NULL); /* Block signals */
+
     if ((pid = fork()) == 0) { /* Child runs user job */
+        if (setpgid(0, 0) < 0) {
+            perror("Set process gid error");
+        }
+        sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
         if (execve(token.argv[0], token.argv, environ) < 0) {
             printf("%s: Command not found. \n", token.argv[0]);
+            fflush(stdout);
             exit(0);
         }
+        sigprocmask(SIG_BLOCK, &mask_all, NULL);
     }
 
-    /* Parent waits for foreground job to terminates */
     /**
      * (!) TODO: unix_error function not callable
      */
-    if (token.builtin != BUILTIN_BG) {
-        int status;
-        if (waitpid(pid, &status, 0) < 0) {
-            perror("waitfg: waitpid error.");
+    /* Parent process */
+    job_state j_state = parse_result == PARSELINE_FG ? FG : BG;
+    add_job(pid, j_state, cmdline);
+    // sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
+
+    if (j_state == FG) { // foreground job
+        // /* Parent waits for foreground job to terminates */
+        // int status;
+        // while ((pid = waitpid(-1, &status, 0)) > 0) {
+        //     if (!WIFEXITED(status)) {
+        //         printf("Child %d terminated abnormally\n", pid);
+        //     }
+        //     sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        //     delete_job(job_from_pid(pid));
+        //     sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
+        // }
+        // /* The only normal termination is if there are no more children */
+        // if (errno != ECHILD) {
+        //     perror("waitpid error");
+        // }
+        // sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
+        sigemptyset(&mask_empty);
+        while (fg_job() != 0) {
+            sigsuspend(&mask_empty);
         }
     } else {
-        printf("%d %s \n", pid, cmdline);
+        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        printf("[%d] (%d) %s\n", job_from_pid(pid), pid, cmdline);
+        // sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
     }
 
     return;
 }
+
+// static void wait_fdjobs(pid_t pid) {
+//     sigset_t prev_one;
+
+//     while (1) {
+//         sigprocmask(SIG_SETMASK, &)
+//     }
+// }
 
 /*****************
  * Signal handlers
@@ -222,7 +260,26 @@ void eval(const char *cmdline) {
  *
  * TODO: Delete this comment and replace it with your own.
  */
-void sigchld_handler(int sig) {}
+void sigchld_handler(int sig) {
+    int olderrno = errno;
+    sigset_t mask_all, prev_all;
+    pid_t pid;
+    int status;
+
+    sigfillset(&mask_all);
+    while ((pid = waitpid(-1, &status, 0)) > 0) { /* Reap zombie child */
+        if (!WIFEXITED(status)) {
+            printf("Child %d terminated abnormally\n", pid);
+        }
+        sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
+        delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        sigprocmask(SIG_SETMASK, &prev_all, NULL);
+    }
+    if (errno != ECHILD) {
+        sio_eprintf("waitpid error");
+    }
+    errno = olderrno;
+}
 
 /**
  * @brief <What does sigint_handler do?>

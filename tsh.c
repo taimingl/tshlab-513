@@ -171,6 +171,8 @@ int main(int argc, char **argv) {
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
+    pid_t pid; // process ID
+    // int fd;    /* output file descriptor*/
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -186,7 +188,25 @@ void eval(const char *cmdline) {
         exit(0);
     }
 
-    pid_t pid; // process ID
+    /* Output file */
+    // if (token.outfile != NULL) {
+    //     fd = open(token.outfile, O_RDONLY|O_CREAT);
+    //     if (fd < 0) {
+    //         printf("Output file reading/writing error\n");
+    //         // exit(1);
+    //     }
+    // }
+
+    /* jobs command */
+    if (token.builtin == BUILTIN_JOBS) {
+        // if (token.outfile != NULL) {
+        //     list_jobs(fd);
+        // } else {
+        //     list_jobs(1);
+        // }
+        list_jobs(1);
+        return;
+    }
 
     sigset_t mask_all, mask_empty;
     sigfillset(&mask_all);
@@ -203,7 +223,7 @@ void eval(const char *cmdline) {
             fflush(stdout);
             exit(0);
         }
-        sigprocmask(SIG_BLOCK, &mask_all, NULL);
+        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
     }
 
     /**
@@ -211,45 +231,21 @@ void eval(const char *cmdline) {
      */
     /* Parent process */
     job_state j_state = parse_result == PARSELINE_FG ? FG : BG;
+    // printf("job state %d\n", j_state);
     add_job(pid, j_state, cmdline);
     // sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
 
     if (j_state == FG) { // foreground job
-        // /* Parent waits for foreground job to terminates */
-        // int status;
-        // while ((pid = waitpid(-1, &status, 0)) > 0) {
-        //     if (!WIFEXITED(status)) {
-        //         printf("Child %d terminated abnormally\n", pid);
-        //     }
-        //     sigprocmask(SIG_BLOCK, &mask_all, NULL);
-        //     delete_job(job_from_pid(pid));
-        //     sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
-        // }
-        // /* The only normal termination is if there are no more children */
-        // if (errno != ECHILD) {
-        //     perror("waitpid error");
-        // }
-        // sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
         sigemptyset(&mask_empty);
         while (fg_job() != 0) {
             sigsuspend(&mask_empty);
         }
     } else {
-        // sigprocmask(SIG_BLOCK, &mask_all, NULL);
         printf("[%d] (%d) %s\n", job_from_pid(pid), pid, cmdline);
-        // sigprocmask(SIG_UNBLOCK, &mask_all, NULL);
     }
 
     return;
 }
-
-// static void wait_fdjobs(pid_t pid) {
-//     sigset_t prev_one;
-
-//     while (1) {
-//         sigprocmask(SIG_SETMASK, &)
-//     }
-// }
 
 /*****************
  * Signal handlers
@@ -267,17 +263,33 @@ void sigchld_handler(int sig) {
     int status;
 
     sigfillset(&mask_all);
-    while ((pid = waitpid(-1, &status, 0)) > 0) { /* Reap zombie child */
-        if (!WIFEXITED(status)) {
-            printf("Child %d terminated abnormally\n", pid);
-        }
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) >
+           0) { /* Reap zombie child */
         sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
-        delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        if (WIFSIGNALED(status)) {
+            if (WTERMSIG(status) == 2) {
+                sio_printf("Job [%d] terminated by signal %d\n",
+                           job_from_pid(pid), WTERMSIG(status));
+            }
+            delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        } else if (WIFSTOPPED(status)) {
+            job_set_state(job_from_pid(pid), ST);
+            sio_printf("Job [%d] stopped by signal %d\n", job_from_pid(pid),
+                       WSTOPSIG(status));
+        } else {
+            delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        }
         sigprocmask(SIG_SETMASK, &prev_all, NULL);
+        // if (!WIFEXITED(status)) {
+        //     sio_printf("Child %d terminated abnormally\n", pid);
+        // }
+        // sigprocmask(SIG_BLOCK, &mask_all, &prev_all);
+        // delete_job(job_from_pid(pid)); /* Delete child job from job list */
+        // sigprocmask(SIG_SETMASK, &prev_all, NULL);
     }
-    if (errno != ECHILD) {
-        sio_eprintf("waitpid error");
-    }
+    // if (errno != ECHILD) {
+    //     sio_eprintf("waitpid error\n");
+    // }
     errno = olderrno;
 }
 

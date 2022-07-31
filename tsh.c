@@ -2,11 +2,9 @@
  * @file tsh.c
  * @brief A tiny shell program with job control
  *
- * TODO: Delete this comment and replace it with your own.
- * <The line above is not a sufficient documentation.
- *  You will need to write your program documentation.
- *  Follow the 15-213/18-213/15-513 style guide at
- *  http://www.cs.cmu.edu/~213/codeStyle.html.>
+ * A tiny shell program capable built-in syscalls with additional built-in
+ * calls of jobs, bg, and fg. Utilized signal handling and I/O
+ * redirecting to execture user requests.
  *
  * @author Taiming Liu <taimingl@andrew.cmu.edu>
  */
@@ -154,25 +152,31 @@ int main(int argc, char **argv) {
 
         // Evaluate the command line
         eval(cmdline);
+
+        fflush(stdout);
+        fflush(stdout);
     }
 
     return -1; // control never reaches here
 }
 
 /**
- * @brief <What does eval do?>
+ * @brief evaluate command line requests entered by user
  *
- * TODO: Delete this comment and replace it with your own.
+ * For built-in requests, jobs, fg, bg, execute immediately.
+ * For other requests, fork a child to run the request.
+ * If the request is requested to be run on the foreground,
+ * parent uses job_lists to timely reap terminated children jobs.
  *
- * NOTE: The shell is supposed to be a long-running process, so this function
- *       (and its helpers) should avoid exiting on error.  This is not to say
- *       they shouldn't detect and print (or otherwise handle) errors!
+ * @param[in] cmdline parsed cmd line structure containing req info.
+ *
  */
 void eval(const char *cmdline) {
     parseline_return parse_result;
     struct cmdline_tokens token;
-    pid_t pid; // process ID
-    // int fd;    /* output file descriptor*/
+    pid_t pid;                  // process ID
+    int fd_in = STDIN_FILENO;   /* output file descriptor*/
+    int fd_out = STDOUT_FILENO; /* output file descriptor*/
 
     // Parse command line
     parse_result = parseline(cmdline, &token);
@@ -188,27 +192,32 @@ void eval(const char *cmdline) {
         exit(0);
     }
 
-    /* Output file */
-    // if (token.outfile != NULL) {
-    //     fd = open(token.outfile, O_RDONLY|O_CREAT);
-    //     if (fd < 0) {
-    //         printf("Output file reading/writing error\n");
-    //         // exit(1);
-    //     }
-    // }
+    /* Redirct I/O */
+    if (token.outfile != NULL) {
+        fd_out = open(token.outfile, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd_out < 0) {
+            printf("Output file reading/writing error\n");
+            // sigprocmask(SIG_SETMASK, &prev_one, NULL);
+            return;
+        }
+    }
+    if (token.infile != NULL) {
+        fd_in = open(token.infile, O_RDONLY, 0644);
+        if (fd_in < 0) {
+            printf("Input file reading/writing error\n");
+            // sigprocmask(SIG_SETMASK, &prev_one, NULL);
+            return;
+        }
+    }
 
+    /* Block signals */
     sigset_t mask_all, prev_one;
     sigfillset(&mask_all);
-    sigprocmask(SIG_BLOCK, &mask_all, &prev_one); /* Block signals */
+    sigprocmask(SIG_BLOCK, &mask_all, &prev_one);
 
     /* jobs command */
     if (token.builtin == BUILTIN_JOBS) {
-        // if (token.outfile != NULL) {
-        //     list_jobs(fd);
-        // } else {
-        //     list_jobs(1);
-        // }
-        list_jobs(1);
+        list_jobs(fd_out);
         sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
         return;
     }
@@ -283,6 +292,18 @@ void eval(const char *cmdline) {
     pid = fork();
     if (pid == 0) {                                /* Child runs user job */
         sigprocmask(SIG_SETMASK, &prev_one, NULL); /* Unblock signals */
+        /* Redirect I/O */
+        if (fd_out < 0 || fd_in < 0) {
+            exit(1);
+        }
+        if (fd_out != STDOUT_FILENO) {
+            dup2(fd_out, STDOUT_FILENO);
+            close(fd_out);
+        }
+        if (fd_in != STDIN_FILENO) {
+            dup2(fd_in, STDIN_FILENO);
+            close(fd_in);
+        }
         if (setpgid(0, 0) < 0) {
             perror("Set process gid error");
         }
@@ -301,13 +322,11 @@ void eval(const char *cmdline) {
 
     /* Parent process */
     job_state j_state = parse_result == PARSELINE_FG ? FG : BG;
-    // printf("job state %d\n", j_state);
     sigprocmask(SIG_BLOCK, &mask_all, NULL);
     add_job(pid, j_state, cmdline);
-    // sigprocmask(SIG_UNBLOCK, &mask_all, NULL); /* Unblock signals */
 
     if (j_state == FG) { // foreground job
-        // sigemptyset(&mask_one);
+        // suspend until all children's reapped
         while (fg_job() != 0) {
             sigsuspend(&prev_one);
         }
